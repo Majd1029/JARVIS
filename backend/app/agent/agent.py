@@ -1,4 +1,5 @@
-"""The JARVIS agent: Claude + tool registry + policy engine, in a manual tool-use loop.
+"""The JARVIS agent: an LLM (local via Ollama, or Claude) + tool registry + policy engine,
+in a manual tool-use loop.
 
 The loop is manual (not the SDK tool runner) because a tool call that needs approval has
 to pause the turn across HTTP requests: we stash the pending calls, return to the client,
@@ -187,6 +188,16 @@ class Agent:
                            "Tell me to continue if you want me to keep going.")
 
     def _call_model(self, messages: list[dict[str, Any]]):
+        if self.settings.provider == "ollama":
+            # Ollama serves the same Messages API format, minus Claude-only options
+            # (adaptive thinking, effort, prompt caching, refusal fallbacks).
+            return self.client.messages.create(
+                model=self.settings.model,
+                max_tokens=self.settings.max_tokens,
+                system=self.system_prompt,
+                tools=self.registry.definitions(),
+                messages=messages,
+            )
         return self.client.beta.messages.create(
             model=self.settings.model,
             max_tokens=self.settings.max_tokens,

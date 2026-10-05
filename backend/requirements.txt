@@ -5,4 +5,5 @@ python-dotenv>=1.0
 sqlalchemy>=2.0
 psycopg[binary]>=3.2
 alembic>=1.13
+ddgs>=9.0  # free DuckDuckGo web search (used with local models)
 tzdata  # IANA timezone database (Windows has none built in)

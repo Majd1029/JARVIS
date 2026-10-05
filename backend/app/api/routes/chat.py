@@ -85,13 +85,15 @@ def _open_conversation(request: Request, conversation_id: str) -> Iterator[Conve
             raise HTTPException(401, "No Anthropic credentials found. Set ANTHROPIC_API_KEY in backend/.env.")
         raise
     except anthropic.RateLimitError:
-        raise HTTPException(429, "Rate limited by the Anthropic API. Try again shortly.")
+        raise HTTPException(429, "Rate limited by the model API. Try again shortly.")
+    except anthropic.NotFoundError as e:
+        raise HTTPException(502, f"Model not found ({e.message}). For Ollama, see README (Ollama setup).")
     except anthropic.BadRequestError as e:
-        raise HTTPException(400, f"Anthropic API rejected the request: {e.message}")
+        raise HTTPException(400, f"The model API rejected the request: {e.message}")
     except anthropic.APIStatusError as e:
-        raise HTTPException(502, f"Anthropic API error ({e.status_code}): {e.message}")
+        raise HTTPException(502, f"Model API error ({e.status_code}): {e.message}")
     except anthropic.APIConnectionError:
-        raise HTTPException(503, "Could not reach the Anthropic API. Check your connection.")
+        raise HTTPException(503, "Could not reach the model server. If you use Ollama, make sure it is running.")
     finally:
         lock.release()
 

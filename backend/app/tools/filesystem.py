@@ -35,23 +35,33 @@ def _human_size(n: int) -> str:
 
 
 def build_filesystem_tools(sandbox: Sandbox) -> list[Tool]:
-    def list_directory(path: str) -> str:
+    def list_directory(path: str, sort_by: str = "name") -> str:
         directory = sandbox.resolve(path)
         if not directory.is_dir():
             raise ToolError(f"Not a directory: {directory}")
-        entries = sorted(directory.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
-        lines = []
-        for entry in entries[:MAX_LIST_ENTRIES]:
+        entries = []
+        for entry in directory.iterdir():
             try:
-                stat = entry.stat()
+                entries.append((entry, entry.stat(), entry.is_dir()))
             except OSError:
                 continue
+        # Sorting here, not in the model: small local models can't reliably rank long lists.
+        if sort_by == "size":
+            entries.sort(key=lambda e: (e[2], -e[1].st_size))  # largest files first, folders last
+        elif sort_by == "modified":
+            entries.sort(key=lambda e: -e[1].st_mtime)  # newest first
+        else:
+            entries.sort(key=lambda e: (not e[2], e[0].name.lower()))  # folders first, then A-Z
+
+        lines = []
+        for entry, stat, is_dir in entries[:MAX_LIST_ENTRIES]:
             modified = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
-            if entry.is_dir():
+            if is_dir:
                 lines.append(f"[dir]  {entry.name}/  (modified {modified})")
             else:
                 lines.append(f"[file] {entry.name}  ({_human_size(stat.st_size)}, modified {modified})")
-        header = f"{directory} - {len(entries)} entries"
+        n_dirs = sum(1 for e in entries if e[2])
+        header = f"{directory} - {len(entries) - n_dirs} files, {n_dirs} folders (sorted by {sort_by})"
         if len(entries) > MAX_LIST_ENTRIES:
             header += f" (showing first {MAX_LIST_ENTRIES})"
         return "\n".join([header, *lines]) if lines else f"{directory} is empty."
@@ -85,10 +95,17 @@ def build_filesystem_tools(sandbox: Sandbox) -> list[Tool]:
     return [
         Tool(
             name="list_directory",
-            description="List the files and sub-folders in a directory, with sizes and modification dates.",
+            description=(
+                "List the files and sub-folders in a directory, with sizes and modification dates. "
+                "Use sort_by='size' to find the largest files and sort_by='modified' for the newest."
+            ),
             input_schema={
                 "type": "object",
-                "properties": {"path": path_property},
+                "properties": {
+                    "path": path_property,
+                    "sort_by": {"type": "string", "enum": ["name", "size", "modified"],
+                                "description": "Order of the listing (default: name)."},
+                },
                 "required": ["path"],
                 "additionalProperties": False,
             },

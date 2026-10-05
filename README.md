@@ -1,15 +1,15 @@
 # JARVIS
 
-A personal AI assistant built as an agent platform: **Claude = brain · tools = hands · memory = context · permissions = safety**.
+A personal AI assistant built as an agent platform: **LLM = brain · tools = hands · memory = context · permissions = safety**.
 
 Current state: roadmap steps 1–3 plus a basic permission layer:
-- FastAPI backend with Claude (`claude-opus-5-5`)
+- FastAPI backend running a **free local model** through Ollama (Qwen3 4B Instruct by default). Claude can be switched on instead.
 - A tool registry, and a policy engine that asks before risky actions
 - Conversations, pending approvals and the execution trace stored in PostgreSQL
 
 ## Setup
 
-Requirements: Python 3.11+ and Docker Desktop.
+Requirements: Python 3.11+, Docker Desktop and [Ollama](https://ollama.com/download). Everything runs locally, for free.
 
 1. Start the database. Run this from the repo root:
 
@@ -26,16 +26,37 @@ Requirements: Python 3.11+ and Docker Desktop.
    python -m venv .venv
    .venv\Scripts\activate
    pip install -r requirements-dev.txt
-   copy .env.example .env      # then put your key in ANTHROPIC_API_KEY
+   copy .env.example .env
    ```
-
-   Get an API key at https://platform.claude.com/.
 
 3. Create the tables:
 
    ```bash
    alembic upgrade head
    ```
+
+4. Set up the local model (Ollama). Run these from the repo root:
+
+   ```bash
+   ollama pull qwen3:4b-instruct
+   ```
+
+   ```bash
+   ollama create jarvis-qwen3 -f ollama/Modelfile
+   ```
+
+   The download is about 2.5 GB. The second command builds `jarvis-qwen3`, which is the same model with a context window big enough for JARVIS's tools and history. `GET /health` reports `model_status: ok` once it's ready.
+
+### Choosing the model
+
+`JARVIS_PROVIDER` in `backend/.env` picks what runs JARVIS:
+
+| Provider | Cost | Notes |
+|---|---|---|
+| `ollama` (default) | Free | Runs on your machine, private, works offline. A 4B model is much less capable than Claude: fine for simple questions and single tool calls, less reliable on multi-step tasks. Web search uses free DuckDuckGo. |
+| `anthropic` | Paid API credits | Claude (`claude-opus-5-5`). Set `ANTHROPIC_API_KEY`. Web search is Anthropic-hosted. |
+
+Expect a few seconds to tens of seconds per reply on a 4 GB laptop GPU, plus a one-time load when the model hasn't been used for 5 minutes. A GPU with more VRAM can run a bigger model: pull it, change `FROM` in `ollama/Modelfile` and re-run `ollama create`.
 
 ## Run
 
@@ -67,7 +88,7 @@ You can also use the interactive API docs at http://127.0.0.1:8000/docs.
 | `GET /conversations/{id}` | Readable message history, plus any tool calls waiting for approval. |
 | `GET /conversations/{id}/trace` | Execution trace: requests, tool calls, permission decisions, results. |
 | `GET /tools` | Registered tools and their permission levels. |
-| `GET /health` | Liveness check, including database connectivity. |
+| `GET /health` | Liveness check: provider, model status, database connectivity. |
 
 A `/chat` response has a `status`:
 - `done`: `reply` holds the answer.
@@ -100,9 +121,9 @@ File tools only work inside `JARVIS_ALLOWED_ROOTS`, which defaults to your home 
 | `messages` | The full Messages API history, one row per message, in order |
 | `audit_events` | The execution trace |
 
-**Messages are stored exactly as Claude returned them,** including thinking blocks. The `content` column uses Postgres `json` rather than `jsonb`, because `jsonb` reorders keys. That way, history replayed after a restart is identical to what was originally sent.
+**Messages are stored exactly as the model returned them,** including thinking blocks. The `content` column uses Postgres `json` rather than `jsonb`, because `jsonb` reorders keys. That way, history replayed after a restart is identical to what was originally sent.
 
-**State changes are saved together.** Each message is saved in the same transaction as the change to the conversation's pending approvals. If the server stops between Claude requesting a tool and its result being saved, the next message answers that call with an "interrupted" error, which keeps the history valid.
+**State changes are saved together.** Each message is saved in the same transaction as the change to the conversation's pending approvals. If the server stops between the model requesting a tool and its result being saved, the next message answers that call with an "interrupted" error, which keeps the history valid.
 
 To change the schema, edit `app/db/models.py` and then run:
 
@@ -120,6 +141,7 @@ Note: conversation locking happens in-process, so run a single server worker (th
 
 ```
 docker-compose.yml       PostgreSQL + pgvector
+ollama/Modelfile         local model definition (jarvis-qwen3)
 backend/
   app/
     main.py              FastAPI app factory
@@ -132,7 +154,7 @@ backend/
     security/            permission levels, policy engine, audit log
   migrations/            Alembic migrations
   cli.py                 terminal client
-  tests/                 pytest suite (fake Claude client, no API calls)
+  tests/                 pytest suite (fake model client, no model calls)
 ```
 
 ## Tests

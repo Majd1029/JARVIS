@@ -68,3 +68,14 @@ def test_policy_engine():
     assert policy.evaluate(PermissionLevel.LOCAL_WRITE) is Decision.CONFIRM
     # External actions always need confirmation, even if config tries to auto-approve everything.
     assert PolicyEngine(PermissionLevel.SENSITIVE).evaluate(PermissionLevel.EXTERNAL) is Decision.CONFIRM
+
+
+def test_list_directory_sorting(fs):
+    tools, root = fs
+    (root / "small.txt").write_text("a")
+    (root / "big.txt").write_text("a" * 5000)
+    (root / "sub").mkdir()
+    listing = tools["list_directory"].execute({"path": ".", "sort_by": "size"})
+    lines = listing.splitlines()
+    assert "2 files, 1 folders" in lines[0]
+    assert "big.txt" in lines[1] and "small.txt" in lines[2] and "sub/" in lines[3]

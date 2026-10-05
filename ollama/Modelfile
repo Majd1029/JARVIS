@@ -1,0 +1,12 @@
+# JARVIS's local model: Qwen3 4B Instruct (2507) with a context window big enough for
+# tool definitions + history. The Instruct variant answers directly instead of writing a long
+# reasoning trace first, which makes it several times faster on a laptop GPU.
+#
+# Build it once:
+#   ollama pull qwen3:4b-instruct
+#   ollama create jarvis-qwen3 -f ollama/Modelfile
+#
+# 8192 tokens suits a 4 GB GPU. With more VRAM, raise it (16384 or 32768) for longer
+# conversations; Ollama drops the oldest context beyond this.
+FROM qwen3:4b-instruct
+PARAMETER num_ctx 8192

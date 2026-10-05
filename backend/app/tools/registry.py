@@ -8,6 +8,7 @@ from app.tools.base import Tool
 from app.tools.calculator import calculator_tool
 from app.tools.clock import clock_tool
 from app.tools.filesystem import Sandbox, build_filesystem_tools
+from app.tools.web import web_search_tool
 
 # Anthropic-hosted web search: runs on Anthropic's servers, results come back in the same response.
 WEB_SEARCH_TOOL: dict[str, Any] = {"type": "web_search_20260209", "name": "web_search", "max_uses": 5}
@@ -48,7 +49,12 @@ class ToolRegistry:
 
 
 def build_default_registry(settings: Settings) -> ToolRegistry:
-    registry = ToolRegistry(server_tools=[WEB_SEARCH_TOOL])
+    if settings.provider == "anthropic":
+        registry = ToolRegistry(server_tools=[WEB_SEARCH_TOOL])
+    else:
+        # Local models have no hosted search, so JARVIS runs a free DuckDuckGo search itself.
+        registry = ToolRegistry()
+        registry.register(web_search_tool)
     registry.register(calculator_tool)
     registry.register(clock_tool)
     for tool in build_filesystem_tools(Sandbox(settings.allowed_roots)):

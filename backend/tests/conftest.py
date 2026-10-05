@@ -35,7 +35,8 @@ class FakeClient:
     def __init__(self, responses):
         self.responses = list(responses)
         self.requests = []
-        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self._create))
+        self.messages = SimpleNamespace(create=self._create)  # used for Ollama
+        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self._create))  # used for Claude
 
     def _create(self, **kwargs):
         # Snapshot the message list: the agent keeps appending to the same list afterwards.
@@ -63,7 +64,9 @@ def engine():
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(
+        provider="anthropic",
         model="claude-opus-5-5",
+        ollama_url="http://127.0.0.1:11434",
         effort="medium",
         max_tokens=1000,
         max_agent_steps=5,

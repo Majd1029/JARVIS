@@ -1,3 +1,6 @@
+from dataclasses import replace
+from unittest.mock import patch
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -90,3 +93,26 @@ def test_step_limit(make, settings):
             for i in range(settings.max_agent_steps)]
     api, _ = make(*loop)
     assert api.post("/chat", json={"message": "loop"}).json()["status"] == "step_limit"
+
+
+def test_ollama_provider_sends_plain_request(settings, engine):
+    local = replace(settings, provider="ollama", model="jarvis-qwen3")
+    fake = FakeClient([
+        response("tool_use", tool_use("t1", "web_search", {"query": "x"})),
+        response("end_turn", text_block("Found it.")),
+    ])
+    api = TestClient(create_app(local, client=fake, engine=engine))
+
+    with patch("app.tools.web.DDGS") as ddgs:
+        ddgs.return_value.text.return_value = [{"title": "T", "href": "https://x.test", "body": "B"}]
+        body = api.post("/chat", json={"message": "search x"}).json()
+
+    assert body["reply"] == "Found it."
+    request = fake.requests[0]
+    assert request["model"] == "jarvis-qwen3"
+    # Claude-only options are not sent to the local model.
+    assert not {"fallbacks", "betas", "thinking", "output_config", "cache_control"} & request.keys()
+    # Web search runs locally (a normal tool), not as an Anthropic server tool.
+    search = next(t for t in request["tools"] if t["name"] == "web_search")
+    assert "input_schema" in search and "type" not in search
+    assert "https://x.test" in fake.requests[1]["messages"][-1]["content"][0]["content"]
