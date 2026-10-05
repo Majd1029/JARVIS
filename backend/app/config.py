@@ -8,7 +8,8 @@ from dotenv import load_dotenv
 
 from app.security.permissions import PermissionLevel
 
-load_dotenv()
+# backend/.env, wherever the server is launched from.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 
 @dataclass(frozen=True)
