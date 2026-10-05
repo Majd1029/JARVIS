@@ -9,10 +9,10 @@ from tests.conftest import FakeClient, response, text_block, tool_use
 
 
 @pytest.fixture
-def make(settings, engine):
+def make(settings, engine, embedder):
     def _make(*responses):
         fake = FakeClient(responses)
-        return TestClient(create_app(settings, client=fake, engine=engine)), fake
+        return TestClient(create_app(settings, client=fake, engine=engine, embedder=embedder)), fake
     return _make
 
 
@@ -95,13 +95,13 @@ def test_step_limit(make, settings):
     assert api.post("/chat", json={"message": "loop"}).json()["status"] == "step_limit"
 
 
-def test_ollama_provider_sends_plain_request(settings, engine):
+def test_ollama_provider_sends_plain_request(settings, engine, embedder):
     local = replace(settings, provider="ollama", model="jarvis-qwen3")
     fake = FakeClient([
         response("tool_use", tool_use("t1", "web_search", {"query": "x"})),
         response("end_turn", text_block("Found it.")),
     ])
-    api = TestClient(create_app(local, client=fake, engine=engine))
+    api = TestClient(create_app(local, client=fake, engine=engine, embedder=embedder))
 
     with patch("app.tools.web.DDGS") as ddgs:
         ddgs.return_value.text.return_value = [{"title": "T", "href": "https://x.test", "body": "B"}]

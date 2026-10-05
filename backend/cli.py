@@ -3,7 +3,8 @@
     python cli.py                        # talks to http://127.0.0.1:8000
     python cli.py --url http://host:port
 
-Commands: 'list' shows saved conversations, 'open <id>' resumes one, 'new' starts fresh, 'exit' quits.
+Commands: 'list' shows saved conversations, 'open <id>' resumes one, 'new' starts fresh,
+'memory' shows remembered facts, 'index <path>' adds a file to searchable memory, 'exit' quits.
 """
 
 import argparse
@@ -65,13 +66,31 @@ def open_conversation(base: str, conversation_id: str) -> str:
     return conversation_id
 
 
+def show_memory(base: str) -> None:
+    facts = request(f"{base}/memory/facts")
+    documents = request(f"{base}/memory/documents")
+    print("Facts:" if facts else "(no remembered facts)")
+    for f in facts:
+        print(f"  #{f['id']}  {f['content']}")
+    if documents:
+        print("Indexed documents:")
+        for d in documents:
+            print(f"  {d['path']}  ({d['chunk_count']} parts)")
+    print()
+
+
+def index_file(base: str, path: str) -> None:
+    result = request(f"{base}/memory/documents", {"path": path})
+    print(f"({result['status']}: {result['document']['path']}, {result['document']['chunk_count']} parts)\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     base = parser.parse_args().url.rstrip("/")
 
     conversation_id = None
-    print("JARVIS online. Commands: list, open <id>, new, exit.\n")
+    print("JARVIS online. Commands: list, open <id>, new, memory, index <path>, exit.\n")
     while True:
         try:
             message = input("you> ").strip()
@@ -89,6 +108,10 @@ def main() -> None:
                 print("(new conversation)\n")
             elif message == "list":
                 list_conversations(base)
+            elif message == "memory":
+                show_memory(base)
+            elif message.startswith("index "):
+                index_file(base, message.split(maxsplit=1)[1].strip('"'))
             elif message.startswith("open "):
                 conversation_id = open_conversation(base, message.split(maxsplit=1)[1])
             else:

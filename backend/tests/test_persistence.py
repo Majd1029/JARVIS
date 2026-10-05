@@ -3,12 +3,13 @@
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from tests.conftest import FakeClient, response, text_block, thinking_block, tool_use
+from tests.conftest import FakeClient, FakeEmbedder, response, text_block, thinking_block, tool_use
 
 
 def boot(settings, engine, *responses):
     fake = FakeClient(responses)
-    return TestClient(create_app(settings, client=fake, engine=engine)), fake
+    api = TestClient(create_app(settings, client=fake, engine=engine, embedder=FakeEmbedder()))
+    return api, fake
 
 
 def test_history_survives_restart_and_replays_unchanged(settings, engine):

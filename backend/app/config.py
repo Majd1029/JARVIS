@@ -29,6 +29,8 @@ class Settings:
     allowed_roots: tuple[Path, ...]
     auto_approve_up_to: PermissionLevel
     database_url: str
+    embedding_model: str = "nomic-embed-text"
+    memory_min_similarity: float = 0.55  # how related a memory must be to attach it to a message
 
 
 def load_settings() -> Settings:
@@ -53,4 +55,6 @@ def load_settings() -> Settings:
         database_url=os.getenv(
             "DATABASE_URL", "postgresql+psycopg://jarvis:jarvis@127.0.0.1:5433/jarvis"
         ),
+        embedding_model=os.getenv("JARVIS_EMBEDDING_MODEL", "nomic-embed-text"),
+        memory_min_similarity=float(os.getenv("JARVIS_MEMORY_MIN_SIMILARITY", "0.55")),
     )

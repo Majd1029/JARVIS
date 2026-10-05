@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.agent.agent import Agent, AgentResult, ConversationBusy, NothingPending
+from app.memory.retrieval import MEMORY_TAG
 from app.memory.short_term import Conversation, ConversationStore, PendingCall
 
 router = APIRouter()
@@ -117,7 +118,10 @@ def _readable(message: dict[str, Any]) -> MessageOut | None:
     if isinstance(content, str):
         text = content
     else:
-        text = "\n".join(b["text"] for b in content if b.get("type") == "text").strip()
+        text = "\n".join(
+            b["text"] for b in content
+            if b.get("type") == "text" and not b["text"].startswith(MEMORY_TAG)
+        ).strip()
     return MessageOut(role=message["role"], text=text) if text else None
 
 

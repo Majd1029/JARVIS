@@ -12,6 +12,8 @@ from typing import Any, Literal
 import anthropic
 
 from app.config import Settings
+from app.memory.embeddings import EmbeddingError
+from app.memory.retrieval import Retriever
 from app.memory.short_term import Conversation, ConversationStore, Pending, PendingCall
 from app.security.audit import AuditLog
 from app.security.permissions import Decision, PolicyEngine
@@ -23,6 +25,10 @@ SYSTEM_PROMPT = """You are JARVIS, a personal AI assistant running on the user's
 You can use tools to look things up, do exact calculations, check the time, and work with the \
 user's files. Use them whenever they give a better answer than guessing. File access is limited \
 to these folders: {roots}.
+
+You have a long-term memory. Facts and document excerpts relevant to the user's message are \
+attached to it in a <memory> block. When the user tells you something worth keeping about \
+themselves, their work or their preferences, save it with the remember tool.
 
 Some actions (such as writing files) need the user's approval before they run. If the user \
 declines a tool call, accept that and continue without it - do not retry the same call.
@@ -59,8 +65,10 @@ class Agent:
         policy: PolicyEngine,
         audit: AuditLog,
         settings: Settings,
+        retriever: Retriever | None = None,
     ):
         self.client = client
+        self.retriever = retriever
         self.store = store
         self.registry = registry
         self.policy = policy
@@ -77,8 +85,26 @@ class Agent:
             raise ConversationBusy()
         self._close_interrupted_tool_calls(conversation)
         self.audit.record(conversation.id, "user_message", text=text)
-        self.store.append_message(conversation, {"role": "user", "content": text})
+        self.store.append_message(conversation, {"role": "user", "content": self._with_memory(conversation, text)})
         return self._run(conversation)
+
+    def _with_memory(self, conversation: Conversation, text: str) -> str | list[dict[str, Any]]:
+        """Attach relevant memory to the user's message. It's stored with the message, so the
+        history replays exactly as the model first saw it."""
+        if self.retriever is None:
+            return text
+        try:
+            recall = self.retriever.recall(text)
+        except EmbeddingError as e:
+            self.audit.record(conversation.id, "memory_unavailable", error=str(e))
+            return text
+        if not recall:
+            return text
+        self.audit.record(conversation.id, "memory_recalled", **recall.summary())
+        return [
+            {"type": "text", "text": Retriever.context_block(recall)},
+            {"type": "text", "text": text},
+        ]
 
     def resolve(self, conversation: Conversation, decisions: dict[str, bool]) -> AgentResult:
         """Apply the user's approve/deny decisions to pending tool calls, then resume the turn."""

@@ -57,6 +57,14 @@ class ConversationSummary:
     updated_at: datetime
 
 
+def _user_text(content: Any) -> str | None:
+    """The text the user typed: a plain string, or the last text block (after any memory block)."""
+    if isinstance(content, str):
+        return content
+    texts = [b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text"]
+    return texts[-1] if texts else None
+
+
 class ConversationStore:
     def __init__(self, session_factory: sessionmaker[Session]):
         self._sessions = session_factory
@@ -104,8 +112,10 @@ class ConversationStore:
             "updated_at": func.now(),
         }
         title = conversation.title
-        if title is None and message["role"] == "user" and isinstance(message["content"], str):
-            title = values["title"] = message["content"][:200]
+        if title is None and message["role"] == "user":
+            text = _user_text(message["content"])
+            if text:
+                title = values["title"] = text[:200]
 
         with self._sessions.begin() as session:
             session.add(MessageRow(

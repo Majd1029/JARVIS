@@ -1,14 +1,17 @@
 import os
+import re
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from anthropic.types.beta import BetaTextBlock, BetaThinkingBlock, BetaToolUseBlock
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
 from app.config import Settings
 from app.db.models import Base
+from app.memory.embeddings import EMBEDDING_DIMS, EmbeddingError
 from app.security.permissions import PermissionLevel
 
 
@@ -44,12 +47,40 @@ class FakeClient:
         return self.responses.pop(0)
 
 
+class FakeEmbedder:
+    """Deterministic bag-of-words vectors: texts sharing words are similar. No Ollama needed."""
+
+    def __init__(self):
+        self.available = True
+
+    def _vector(self, text):
+        if not self.available:
+            raise EmbeddingError("Ollama not reachable for embeddings (fake)")
+        vector = [0.0] * EMBEDDING_DIMS
+        for word in re.findall(r"[a-z0-9]+", text.lower()):
+            vector[zlib.crc32(word.encode()) % EMBEDDING_DIMS] += 1.0
+        return vector
+
+    def embed_query(self, text):
+        return self._vector(text)
+
+    def embed_documents(self, texts):
+        return [self._vector(t) for t in texts]
+
+
+@pytest.fixture
+def embedder():
+    return FakeEmbedder()
+
+
 @pytest.fixture
 def engine():
     """In-memory SQLite by default; set JARVIS_TEST_DATABASE_URL to run against PostgreSQL."""
     url = os.getenv("JARVIS_TEST_DATABASE_URL")
     if url:
         engine = create_engine(url)
+        with engine.begin() as connection:
+            connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         Base.metadata.drop_all(engine)
     else:
         engine = create_engine("sqlite://", poolclass=StaticPool,
@@ -73,4 +104,5 @@ def settings(tmp_path: Path) -> Settings:
         allowed_roots=(tmp_path.resolve(),),
         auto_approve_up_to=PermissionLevel.LOCAL_READ,
         database_url="unused-in-tests",
+        memory_min_similarity=0.3,  # bag-of-words vectors score lower than real embeddings
     )

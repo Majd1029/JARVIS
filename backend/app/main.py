@@ -12,11 +12,17 @@ from sqlalchemy.engine import Engine
 
 from app.agent.agent import Agent
 from app.api.routes.chat import router as chat_router
+from app.api.routes.memory import router as memory_router
 from app.config import Settings, load_settings
 from app.db.session import make_engine, make_session_factory
+from app.memory.embeddings import Embedder
+from app.memory.long_term import FactStore
+from app.memory.retrieval import Retriever
+from app.memory.semantic import DocumentStore
 from app.memory.short_term import ConversationStore
 from app.security.audit import AuditLog
 from app.security.permissions import PolicyEngine
+from app.tools.filesystem import Sandbox
 from app.tools.registry import build_default_registry
 
 logger = logging.getLogger("jarvis")
@@ -26,23 +32,36 @@ def create_app(
     settings: Settings | None = None,
     client: anthropic.Anthropic | None = None,
     engine: Engine | None = None,
+    embedder: Embedder | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     client = client or make_client(settings)
     engine = engine or make_engine(settings.database_url)
     sessions = make_session_factory(engine)
+    # Embeddings always come from local Ollama, whichever provider runs the chat model.
+    embedder = embedder or Embedder(settings.ollama_url, settings.embedding_model)
+    retriever = Retriever(
+        embedder,
+        FactStore(sessions, embedder),
+        DocumentStore(sessions, embedder),
+        min_score=settings.memory_min_similarity,
+    )
 
-    app = FastAPI(title="JARVIS", version="0.2.0")
+    app = FastAPI(title="JARVIS", version="0.3.0")
     app.state.store = ConversationStore(sessions)
+    app.state.retriever = retriever
+    app.state.sandbox = Sandbox(settings.allowed_roots)
     app.state.agent = Agent(
         client=client,
         store=app.state.store,
-        registry=build_default_registry(settings),
+        registry=build_default_registry(settings, retriever),
         policy=PolicyEngine(settings.auto_approve_up_to),
         audit=AuditLog(sessions),
         settings=settings,
+        retriever=retriever,
     )
     app.include_router(chat_router)
+    app.include_router(memory_router)
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -52,8 +71,12 @@ def create_app(
             database = "ok"
         except Exception as e:
             database = f"unavailable ({type(e).__name__})"
+        chat_model = (ollama_model_status(settings.ollama_url, settings.model)
+                      if settings.provider == "ollama" else "not checked")
         return {"status": "ok", "provider": settings.provider, "model": settings.model,
-                "model_status": model_status(settings), "database": database}
+                "model_status": chat_model,
+                "embedding_model_status": ollama_model_status(settings.ollama_url, settings.embedding_model),
+                "database": database}
 
     return app
 
@@ -68,17 +91,15 @@ def make_client(settings: Settings) -> anthropic.Anthropic:
     return anthropic.Anthropic()
 
 
-def model_status(settings: Settings) -> str:
-    if settings.provider != "ollama":
-        return "not checked"
+def ollama_model_status(ollama_url: str, model: str) -> str:
     try:
-        with urllib.request.urlopen(f"{settings.ollama_url}/api/tags", timeout=2) as response:
+        with urllib.request.urlopen(f"{ollama_url}/api/tags", timeout=2) as response:
             names = {m["name"] for m in json.loads(response.read())["models"]}
     except OSError:
-        return f"Ollama not reachable at {settings.ollama_url} - is it running?"
-    if settings.model in names or f"{settings.model}:latest" in names:
+        return f"Ollama not reachable at {ollama_url} - is it running?"
+    if model in names or f"{model}:latest" in names:
         return "ok"
-    return f"model '{settings.model}' not installed - see README (Ollama setup)"
+    return f"model '{model}' not installed - see README (Ollama setup)"
 
 
 app = create_app()
