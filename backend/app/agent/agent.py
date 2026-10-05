@@ -10,8 +10,8 @@ from typing import Any, Literal
 
 import anthropic
 
-from app.agent.context import Conversation, PendingCall
 from app.config import Settings
+from app.memory.short_term import Conversation, ConversationStore, Pending, PendingCall
 from app.security.audit import AuditLog
 from app.security.permissions import Decision, PolicyEngine
 from app.tools.base import ToolError
@@ -53,12 +53,14 @@ class Agent:
     def __init__(
         self,
         client: anthropic.Anthropic,
+        store: ConversationStore,
         registry: ToolRegistry,
         policy: PolicyEngine,
         audit: AuditLog,
         settings: Settings,
     ):
         self.client = client
+        self.store = store
         self.registry = registry
         self.policy = policy
         self.audit = audit
@@ -72,20 +74,22 @@ class Agent:
     def send(self, conversation: Conversation, text: str) -> AgentResult:
         if conversation.pending:
             raise ConversationBusy()
+        self._close_interrupted_tool_calls(conversation)
         self.audit.record(conversation.id, "user_message", text=text)
-        conversation.messages.append({"role": "user", "content": text})
+        self.store.append_message(conversation, {"role": "user", "content": text})
         return self._run(conversation)
 
     def resolve(self, conversation: Conversation, decisions: dict[str, bool]) -> AgentResult:
         """Apply the user's approve/deny decisions to pending tool calls, then resume the turn."""
-        if not conversation.pending:
+        pending = conversation.pending
+        if not pending:
             raise NothingPending()
-        missing = [c.id for c in conversation.pending if c.id not in decisions]
+        missing = [c.id for c in pending.calls if c.id not in decisions]
         if missing:
             raise ValueError(f"Missing decisions for tool calls: {', '.join(missing)}")
 
-        results = dict(conversation.held_results)
-        for call in conversation.pending:
+        results = dict(pending.held_results)
+        for call in pending.calls:
             approved = decisions[call.id]
             self.audit.record(conversation.id, "user_decision", tool=call.tool,
                               tool_use_id=call.id, approved=approved)
@@ -94,13 +98,26 @@ class Agent:
             else:
                 results[call.id] = _tool_result(call.id, "The user declined this action.", is_error=True)
 
-        conversation.messages.append(
-            {"role": "user", "content": [results[i] for i in conversation.tool_use_order]}
+        # Appending the results also clears the pending state (same transaction).
+        self.store.append_message(
+            conversation, {"role": "user", "content": [results[i] for i in pending.tool_use_order]}
         )
-        conversation.pending = []
-        conversation.held_results = {}
-        conversation.tool_use_order = []
         return self._run(conversation)
+
+    def _close_interrupted_tool_calls(self, conversation: Conversation) -> None:
+        """If the server stopped between Claude asking for tools and the results being saved,
+        answer those calls with an error so the history stays valid for the API."""
+        if not conversation.messages:
+            return
+        last = conversation.messages[-1]
+        if last["role"] != "assistant" or not isinstance(last["content"], list):
+            return
+        dangling = [b["id"] for b in last["content"] if b.get("type") == "tool_use"]
+        if dangling:
+            self.audit.record(conversation.id, "interrupted_tool_calls", tool_use_ids=dangling)
+            self.store.append_message(conversation, {"role": "user", "content": [
+                _tool_result(i, "Interrupted: this tool call never ran.", is_error=True) for i in dangling
+            ]})
 
     # ---- loop -----------------------------------------------------------------------------
 
@@ -118,13 +135,19 @@ class Agent:
                 return AgentResult(conversation.id, "refused",
                                    "I can't help with that request.")
 
-            conversation.messages.append({"role": "assistant", "content": response.content})
+            # Stored exactly as the API returned it, so thinking blocks replay byte-for-byte.
+            assistant_message = {
+                "role": "assistant",
+                "content": [block.to_dict(mode="json") for block in response.content],
+            }
 
             if response.stop_reason == "pause_turn":
                 # A server-side tool (web search) hit its iteration limit; re-send to resume.
+                self.store.append_message(conversation, assistant_message)
                 continue
 
             if response.stop_reason != "tool_use":
+                self.store.append_message(conversation, assistant_message)
                 reply = _text(response)
                 if response.stop_reason == "max_tokens":
                     reply += "\n\n[Response cut off: hit the max_tokens limit.]"
@@ -149,13 +172,14 @@ class Agent:
                     pending.append(PendingCall(block.id, block.name, dict(block.input), tool.permission.name))
 
             if pending:
-                conversation.pending = pending
-                conversation.held_results = results
-                conversation.tool_use_order = [b.id for b in tool_uses]
+                self.store.append_message(conversation, assistant_message, pending=Pending(
+                    calls=pending, held_results=results, tool_use_order=[b.id for b in tool_uses]
+                ))
                 return AgentResult(conversation.id, "waiting_for_user", _text(response), pending)
 
             # All results go back in a single user message, in the order Claude asked for them.
-            conversation.messages.append({"role": "user", "content": [results[b.id] for b in tool_uses]})
+            self.store.append_message(conversation, assistant_message)
+            self.store.append_message(conversation, {"role": "user", "content": [results[b.id] for b in tool_uses]})
 
         self.audit.record(conversation.id, "step_limit", steps=self.settings.max_agent_steps)
         return AgentResult(conversation.id, "step_limit",

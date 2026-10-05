@@ -2,6 +2,8 @@
 
     python cli.py                        # talks to http://127.0.0.1:8000
     python cli.py --url http://host:port
+
+Commands: 'list' shows saved conversations, 'open <id>' resumes one, 'new' starts fresh, 'exit' quits.
 """
 
 import argparse
@@ -11,12 +13,11 @@ import urllib.error
 import urllib.request
 
 
-def post(url: str, payload: dict) -> dict:
-    request = urllib.request.Request(
-        url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}
-    )
+def request(url: str, payload: dict | None = None) -> dict | list:
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=600) as response:
+        with urllib.request.urlopen(req, timeout=600) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as e:
         detail = json.loads(e.read() or b"{}").get("detail", e.reason)
@@ -31,37 +32,70 @@ def ask_approval(call: dict) -> bool:
     return input("  Allow? [y/N] ").strip().lower() in ("y", "yes")
 
 
+def handle_approvals(base: str, conversation_id: str, result: dict) -> dict:
+    while result.get("pending"):
+        if result.get("reply"):
+            print(f"\njarvis> {result['reply']}")
+        decisions = {call["id"]: ask_approval(call) for call in result["pending"]}
+        result = request(f"{base}/chat/{conversation_id}/confirm", {"decisions": decisions})
+    return result
+
+
+def list_conversations(base: str) -> None:
+    conversations = request(f"{base}/conversations?limit=20")
+    if not conversations:
+        print("(no saved conversations)\n")
+        return
+    for c in conversations:
+        flag = "  [waiting for approval]" if c["waiting_for_user"] else ""
+        print(f"  {c['id']}  {c['updated_at'][:16].replace('T', ' ')}  {c['title'] or '(untitled)'}{flag}")
+    print()
+
+
+def open_conversation(base: str, conversation_id: str) -> str:
+    conversation = request(f"{base}/conversations/{conversation_id}")
+    print(f"(resumed: {conversation['title'] or conversation_id})")
+    for message in conversation["messages"][-6:]:
+        speaker = "you" if message["role"] == "user" else "jarvis"
+        print(f"{speaker}> {message['text']}")
+    if conversation["pending"]:
+        result = handle_approvals(base, conversation_id, conversation)
+        print(f"\njarvis> {result['reply']}")
+    print()
+    return conversation_id
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     base = parser.parse_args().url.rstrip("/")
 
     conversation_id = None
-    print("JARVIS online. Type 'exit' to quit, 'new' for a fresh conversation.\n")
+    print("JARVIS online. Commands: list, open <id>, new, exit.\n")
     while True:
         try:
             message = input("you> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return
-        if not message:
-            continue
-        if message == "exit":
-            return
-        if message == "new":
-            conversation_id = None
-            print("(new conversation)\n")
-            continue
 
         try:
-            result = post(f"{base}/chat", {"message": message, "conversation_id": conversation_id})
-            conversation_id = result["conversation_id"]
-            while result["status"] == "waiting_for_user":
-                if result["reply"]:
-                    print(f"\njarvis> {result['reply']}")
-                decisions = {call["id"]: ask_approval(call) for call in result["pending"]}
-                result = post(f"{base}/chat/{conversation_id}/confirm", {"decisions": decisions})
-            print(f"\njarvis> {result['reply']}\n")
+            if not message:
+                continue
+            if message == "exit":
+                return
+            if message == "new":
+                conversation_id = None
+                print("(new conversation)\n")
+            elif message == "list":
+                list_conversations(base)
+            elif message.startswith("open "):
+                conversation_id = open_conversation(base, message.split(maxsplit=1)[1])
+            else:
+                result = request(f"{base}/chat", {"message": message, "conversation_id": conversation_id})
+                conversation_id = result["conversation_id"]
+                result = handle_approvals(base, conversation_id, result)
+                print(f"\njarvis> {result['reply']}\n")
         except RuntimeError as e:
             print(f"\n[error] {e}\n", file=sys.stderr)
         except urllib.error.URLError:

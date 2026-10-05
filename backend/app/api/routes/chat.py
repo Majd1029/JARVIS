@@ -1,14 +1,15 @@
-"""Chat endpoints: send a message, approve/deny pending tool calls, read the execution trace."""
+"""Chat endpoints: send a message, approve/deny pending tool calls, browse conversations."""
 
 from contextlib import contextmanager
-from typing import Any
+from datetime import datetime
+from typing import Any, Iterator
 
 import anthropic
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.agent.agent import Agent, AgentResult, ConversationBusy, NothingPending
-from app.agent.context import Conversation, ConversationStore
+from app.memory.short_term import Conversation, ConversationStore, PendingCall
 
 router = APIRouter()
 
@@ -36,6 +37,27 @@ class ChatResponse(BaseModel):
     pending: list[PendingCallOut] = []
 
 
+class ConversationSummaryOut(BaseModel):
+    id: str
+    title: str | None
+    message_count: int
+    waiting_for_user: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class MessageOut(BaseModel):
+    role: str
+    text: str
+
+
+class ConversationOut(BaseModel):
+    id: str
+    title: str | None
+    messages: list[MessageOut]
+    pending: list[PendingCallOut] = []
+
+
 def _agent(request: Request) -> Agent:
     return request.app.state.agent
 
@@ -44,19 +66,17 @@ def _store(request: Request) -> ConversationStore:
     return request.app.state.store
 
 
-def _get_conversation(request: Request, conversation_id: str) -> Conversation:
-    conversation = _store(request).get(conversation_id)
-    if conversation is None:
-        raise HTTPException(404, f"Conversation '{conversation_id}' not found")
-    return conversation
-
-
 @contextmanager
-def _exclusive(conversation: Conversation):
-    if not conversation.lock.acquire(blocking=False):
+def _open_conversation(request: Request, conversation_id: str) -> Iterator[Conversation]:
+    """Lock the conversation, then load its latest state from the database."""
+    lock = _store(request).lock(conversation_id)
+    if not lock.acquire(blocking=False):
         raise HTTPException(409, "This conversation is already processing a request.")
     try:
-        yield
+        conversation = _store(request).get(conversation_id)
+        if conversation is None:
+            raise HTTPException(404, f"Conversation '{conversation_id}' not found")
+        yield conversation
     except anthropic.AuthenticationError:
         raise HTTPException(401, "Anthropic API authentication failed. Check ANTHROPIC_API_KEY.")
     except TypeError as e:
@@ -73,7 +93,11 @@ def _exclusive(conversation: Conversation):
     except anthropic.APIConnectionError:
         raise HTTPException(503, "Could not reach the Anthropic API. Check your connection.")
     finally:
-        conversation.lock.release()
+        lock.release()
+
+
+def _pending_out(calls: list[PendingCall]) -> list[PendingCallOut]:
+    return [PendingCallOut(**vars(c)) for c in calls]
 
 
 def _to_response(result: AgentResult) -> ChatResponse:
@@ -81,19 +105,26 @@ def _to_response(result: AgentResult) -> ChatResponse:
         conversation_id=result.conversation_id,
         status=result.status,
         reply=result.reply,
-        pending=[PendingCallOut(**vars(p)) for p in result.pending],
+        pending=_pending_out(result.pending),
     )
+
+
+def _readable(message: dict[str, Any]) -> MessageOut | None:
+    """The human-readable part of a stored message (skips tool results and thinking)."""
+    content = message["content"]
+    if isinstance(content, str):
+        text = content
+    else:
+        text = "\n".join(b["text"] for b in content if b.get("type") == "text").strip()
+    return MessageOut(role=message["role"], text=text) if text else None
 
 
 # Plain `def` endpoints: FastAPI runs them in a thread pool, so the blocking SDK calls are fine.
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(body: ChatRequest, request: Request) -> ChatResponse:
-    if body.conversation_id:
-        conversation = _get_conversation(request, body.conversation_id)
-    else:
-        conversation = _store(request).create()
-    with _exclusive(conversation):
+    conversation_id = body.conversation_id or _store(request).create().id
+    with _open_conversation(request, conversation_id) as conversation:
         try:
             return _to_response(_agent(request).send(conversation, body.message))
         except ConversationBusy:
@@ -103,8 +134,7 @@ def chat(body: ChatRequest, request: Request) -> ChatResponse:
 
 @router.post("/chat/{conversation_id}/confirm", response_model=ChatResponse)
 def confirm(conversation_id: str, body: ConfirmRequest, request: Request) -> ChatResponse:
-    conversation = _get_conversation(request, conversation_id)
-    with _exclusive(conversation):
+    with _open_conversation(request, conversation_id) as conversation:
         try:
             return _to_response(_agent(request).resolve(conversation, body.decisions))
         except NothingPending:
@@ -113,9 +143,25 @@ def confirm(conversation_id: str, body: ConfirmRequest, request: Request) -> Cha
             raise HTTPException(422, str(e))
 
 
-@router.get("/chat/{conversation_id}/trace")
+@router.get("/conversations", response_model=list[ConversationSummaryOut])
+def list_conversations(request: Request, limit: int = 50) -> list[ConversationSummaryOut]:
+    return [ConversationSummaryOut(**vars(s)) for s in _store(request).list(limit)]
+
+
+@router.get("/conversations/{conversation_id}", response_model=ConversationOut)
+def get_conversation(conversation_id: str, request: Request) -> ConversationOut:
+    conversation = _store(request).get(conversation_id)
+    if conversation is None:
+        raise HTTPException(404, f"Conversation '{conversation_id}' not found")
+    messages = [m for m in map(_readable, conversation.messages) if m]
+    pending = _pending_out(conversation.pending.calls) if conversation.pending else []
+    return ConversationOut(id=conversation.id, title=conversation.title, messages=messages, pending=pending)
+
+
+@router.get("/conversations/{conversation_id}/trace")
 def trace(conversation_id: str, request: Request) -> list[dict[str, Any]]:
-    _get_conversation(request, conversation_id)
+    if _store(request).get(conversation_id) is None:
+        raise HTTPException(404, f"Conversation '{conversation_id}' not found")
     return _agent(request).audit.trace(conversation_id)
 
 

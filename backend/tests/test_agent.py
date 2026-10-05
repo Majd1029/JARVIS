@@ -1,16 +1,20 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
 from tests.conftest import FakeClient, response, text_block, tool_use
 
 
-def make(settings, *responses):
-    fake = FakeClient(responses)
-    return TestClient(create_app(settings, client=fake)), fake
+@pytest.fixture
+def make(settings, engine):
+    def _make(*responses):
+        fake = FakeClient(responses)
+        return TestClient(create_app(settings, client=fake, engine=engine)), fake
+    return _make
 
 
-def test_plain_chat(settings):
-    api, fake = make(settings, response("end_turn", text_block("Tokyo.")))
+def test_plain_chat(make):
+    api, fake = make(response("end_turn", text_block("Tokyo.")))
     body = api.post("/chat", json={"message": "Capital of Japan?"}).json()
     assert body["status"] == "done"
     assert body["reply"] == "Tokyo."
@@ -20,9 +24,8 @@ def test_plain_chat(settings):
     assert {t["name"] for t in request["tools"]} >= {"calculator", "read_file", "web_search"}
 
 
-def test_auto_approved_tool_runs_without_asking(settings):
+def test_auto_approved_tool_runs_without_asking(make):
     api, fake = make(
-        settings,
         response("tool_use", tool_use("t1", "calculator", {"expression": "6*7"})),
         response("end_turn", text_block("42")),
     )
@@ -32,10 +35,9 @@ def test_auto_approved_tool_runs_without_asking(settings):
     assert tool_results == [{"type": "tool_result", "tool_use_id": "t1", "content": "42"}]
 
 
-def test_write_requires_approval_then_runs(settings):
+def test_write_requires_approval_then_runs(make, settings):
     target = settings.allowed_roots[0] / "hello.txt"
     api, fake = make(
-        settings,
         response("tool_use", text_block("Writing it now."),
                  tool_use("t1", "get_current_datetime", {}),
                  tool_use("t2", "write_file", {"path": str(target), "content": "hi"})),
@@ -57,14 +59,13 @@ def test_write_requires_approval_then_runs(settings):
     results = fake.requests[1]["messages"][-1]["content"]
     assert [r["tool_use_id"] for r in results] == ["t1", "t2"]
 
-    events = [e["event"] for e in api.get(f"/chat/{cid}/trace").json()]
+    events = [e["event"] for e in api.get(f"/conversations/{cid}/trace").json()]
     assert "user_decision" in events and events[-1] == "final_response"
 
 
-def test_denied_tool_is_reported_to_model(settings):
+def test_denied_tool_is_reported_to_model(make, settings):
     target = settings.allowed_roots[0] / "nope.txt"
     api, fake = make(
-        settings,
         response("tool_use", tool_use("t1", "write_file", {"path": str(target), "content": "x"})),
         response("end_turn", text_block("Okay, I won't.")),
     )
@@ -76,17 +77,16 @@ def test_denied_tool_is_reported_to_model(settings):
     assert result["is_error"] is True
 
 
-def test_missing_decision_rejected(settings):
+def test_missing_decision_rejected(make):
     api, _ = make(
-        settings,
         response("tool_use", tool_use("t1", "write_file", {"path": "a.txt", "content": "x"})),
     )
     cid = api.post("/chat", json={"message": "write"}).json()["conversation_id"]
     assert api.post(f"/chat/{cid}/confirm", json={"decisions": {}}).status_code == 422
 
 
-def test_step_limit(settings):
+def test_step_limit(make, settings):
     loop = [response("tool_use", tool_use(f"t{i}", "calculator", {"expression": "1+1"}))
             for i in range(settings.max_agent_steps)]
-    api, _ = make(settings, *loop)
+    api, _ = make(*loop)
     assert api.post("/chat", json={"message": "loop"}).json()["status"] == "step_limit"

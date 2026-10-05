@@ -1,18 +1,27 @@
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from anthropic.types.beta import BetaTextBlock, BetaThinkingBlock, BetaToolUseBlock
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from app.config import Settings
+from app.db.models import Base
 from app.security.permissions import PermissionLevel
 
 
 def text_block(text):
-    return SimpleNamespace(type="text", text=text)
+    return BetaTextBlock(type="text", text=text)
+
+
+def thinking_block(signature):
+    return BetaThinkingBlock(type="thinking", thinking="", signature=signature)
 
 
 def tool_use(id, name, input):
-    return SimpleNamespace(type="tool_use", id=id, name=name, input=input)
+    return BetaToolUseBlock(type="tool_use", id=id, name=name, input=input)
 
 
 def response(stop_reason, *content):
@@ -35,6 +44,23 @@ class FakeClient:
 
 
 @pytest.fixture
+def engine():
+    """In-memory SQLite by default; set JARVIS_TEST_DATABASE_URL to run against PostgreSQL."""
+    url = os.getenv("JARVIS_TEST_DATABASE_URL")
+    if url:
+        engine = create_engine(url)
+        Base.metadata.drop_all(engine)
+    else:
+        engine = create_engine("sqlite://", poolclass=StaticPool,
+                               connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    yield engine
+    if url:
+        Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+@pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(
         model="claude-opus-5-5",
@@ -43,5 +69,5 @@ def settings(tmp_path: Path) -> Settings:
         max_agent_steps=5,
         allowed_roots=(tmp_path.resolve(),),
         auto_approve_up_to=PermissionLevel.LOCAL_READ,
-        audit_log=tmp_path / "audit.jsonl",
+        database_url="unused-in-tests",
     )

@@ -19,7 +19,7 @@ class Settings:
     max_agent_steps: int
     allowed_roots: tuple[Path, ...]
     auto_approve_up_to: PermissionLevel
-    audit_log: Path
+    database_url: str
 
 
 def load_settings() -> Settings:
@@ -35,5 +35,7 @@ def load_settings() -> Settings:
         max_agent_steps=int(os.getenv("JARVIS_MAX_AGENT_STEPS", "15")),
         allowed_roots=tuple(r.resolve() for r in roots),
         auto_approve_up_to=PermissionLevel(int(os.getenv("JARVIS_AUTO_APPROVE_LEVEL", "1"))),
-        audit_log=Path(os.getenv("JARVIS_AUDIT_LOG", "data/audit.jsonl")),
+        database_url=os.getenv(
+            "DATABASE_URL", "postgresql+psycopg://jarvis:jarvis@127.0.0.1:5433/jarvis"
+        ),
     )

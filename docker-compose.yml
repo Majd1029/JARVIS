@@ -1,0 +1,23 @@
+# JARVIS database: PostgreSQL 17 with the pgvector extension (needed for semantic memory, roadmap step 4).
+# Port 5433 on the host so it doesn't clash with a locally installed PostgreSQL on 5432.
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: jarvis-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jarvis
+      POSTGRES_PASSWORD: jarvis  # local-only dev credentials; bound to 127.0.0.1 below
+      POSTGRES_DB: jarvis
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - jarvis-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jarvis -d jarvis"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  jarvis-pgdata:
