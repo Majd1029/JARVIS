@@ -1,0 +1,5 @@
+anthropic>=1.11,<2
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-dotenv>=1.0
+tzdata  # IANA timezone database (Windows has none built in)
