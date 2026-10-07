@@ -18,8 +18,8 @@ A personal J.A.R.V.I.S.-style AI assistant, built as an **agent platform**: LLM 
 | 2. Tool calling + tool registry + permission layer | ✅ done |
 | 3. PostgreSQL persistence (conversations, pending approvals, audit trace) | ✅ done |
 | 4. Memory: long-term facts + semantic memory (RAG, pgvector) | ✅ done |
-| 5. Browser control (Playwright) | ⏭️ next |
-| 6. Screenshots + computer vision/control | todo |
+| 5. Browser control (Playwright) | ✅ done |
+| 6. Screenshots + computer vision/control | ⏭️ next |
 | 7. Voice (speech-to-text / text-to-speech; push-to-talk first, wake word later) | todo |
 | 8. Scheduler / events (reminders, cron, webhooks, file watchers) | todo |
 | 9. Permissions (basic version already exists; extend as risky tools arrive) | partial |
@@ -27,7 +27,7 @@ A personal J.A.R.V.I.S.-style AI assistant, built as an **agent platform**: LLM 
 | 11. Frontend dashboard (Next.js + React + TypeScript) | todo |
 | 12. Plugins (installable capabilities) | todo |
 
-Commit history: `05ccb9b` MVP → `a883aa5` step 3 → `cd6a56b` .env fix → `c27d293` local Ollama → `e00e81f` step 4 → `7cdfec4` LF normalization.
+Commit history: `05ccb9b` MVP → `a883aa5` step 3 → `cd6a56b` .env fix → `c27d293` local Ollama → `e00e81f` step 4 → `7cdfec4` LF normalization → `ea3a611` CLAUDE.md → step 5 (browser) commit.
 
 ## Environment on this machine
 
@@ -40,6 +40,7 @@ Commit history: `05ccb9b` MVP → `a883aa5` step 3 → `cd6a56b` .env fix → `c
 | Ollama models | `qwen3:4b-instruct` (base), `jarvis-qwen3` (base + `num_ctx 8192`, built from `ollama/Modelfile`), `nomic-embed-text` (embeddings, 768 dims) |
 | Secrets | `backend\.env` (gitignored) holds `ANTHROPIC_API_KEY`. The key is valid, but the account has **no credits**. Never commit `.env`. |
 | Server launcher | `.claude/launch.json` config `jarvis-backend` runs uvicorn on port 8000 from the repo root (use `preview_start`). |
+| Browser | Playwright drives the **installed Microsoft Edge** (`channel="msedge"`); Chrome is also installed. No `playwright install` download was needed. |
 
 **Important home-folder quirk:** `C:\Users\majda` itself is a git repo, pointing to an unrelated Bitcoin project. JARVIS has its own `.git`, so it's independent. Don't touch the home-folder repo, which has unpushed commits.
 
@@ -56,13 +57,13 @@ To run the tests on real Postgres, set `JARVIS_TEST_DATABASE_URL=postgresql+psyc
 To rebuild the local model from the repo root: `ollama create jarvis-qwen3 -f ollama/Modelfile`.
 For a health check, `GET /health` reports provider, `model_status`, `embedding_model_status` and the database.
 
-**Current state: 37 tests, all passing on both SQLite and PostgreSQL.** Always run both after changes that touch the database.
+**Current state: 48 tests, all passing on both SQLite and PostgreSQL** (about 15 s; the browser tests launch real headless Edge against a local test site and skip if no browser can start). Always run both after changes that touch the database.
 
 ## Architecture
 
 ```
 backend/app/
-  main.py               create_app(settings, client, engine, embedder) factory; make_client(); /health
+  main.py               create_app(settings, client, engine, embedder, browser) factory; make_client(); warm_up(); lifespan; /health
   config.py             Settings (frozen dataclass) from env; loads backend/.env by absolute path
   agent/agent.py        Agent: manual tool-use loop, approval pause/resume, memory attachment
   api/routes/chat.py    /chat, /chat/{id}/confirm, /conversations, /conversations/{id}[/trace], /tools
@@ -76,7 +77,7 @@ backend/app/
   db/models.py          SQLAlchemy models; db/session.py engine + sessionmaker
   tools/base.py         Tool dataclass (name, description, input_schema, permission, handler), ToolError
   tools/registry.py     ToolRegistry + build_default_registry(settings, retriever)
-  tools/*.py            calculator, clock, filesystem (Sandbox), web (DuckDuckGo), memory
+  tools/*.py            calculator, clock, filesystem (Sandbox), web (DuckDuckGo), memory, browser (Playwright)
   security/permissions.py  PermissionLevel 0–5, PolicyEngine (ALLOW / CONFIRM)
   security/audit.py     AuditLog → audit_events table (the execution trace)
 backend/migrations/     Alembic (2 revisions: e3dde3b74808 base tables, bff77902a7d8 memory + pgvector)
@@ -99,6 +100,8 @@ Levels: 0 public read, 1 local read, 2 local write, 3 execute, 4 external comms,
 | list_directory (sort_by name/size/modified), read_file | 1 | yes |
 | remember, search_memory, index_file | 1 | yes (memory writes only touch JARVIS's own DB) |
 | write_file, forget | 2 | **asks** |
+| browser_open, browser_read, browser_follow_link, browser_back | 0 | yes |
+| browser_click, browser_type (optional press_enter) | 4 | **always asks** |
 
 File tools are sandboxed to `JARVIS_ALLOWED_ROOTS` (default: home folder) via `Sandbox.resolve()`, which resolves symlinks and `..`. Tool names must match `^[a-zA-Z0-9_-]{1,64}$` (no dots). Tools use `strict: True` schemas with `additionalProperties: false`.
 
@@ -117,6 +120,9 @@ When the model requests a tool that needs confirmation, the agent runs the auto-
 8. **The chunker version is in the content hash** (`CHUNKER_VERSION`). Bump it when `chunk_text` changes, so existing documents get re-indexed.
 9. **Conversation locks are in-process.** Run one uvicorn worker. Routes take the lock first, *then* load fresh state from the DB.
 10. **Anything Claude-specific stays on the `anthropic` branch** of `Agent._call_model`. Ollama rejects or ignores it.
+11. **All Playwright calls run on `BrowserSession`'s single worker thread** (`_run()`). The sync API breaks if it's used from FastAPI's threadpool threads directly.
+12. **The browser shows pages as text plus numbered elements.** Elements are tagged in the DOM with `data-jarvis-id`, and tools act by number. Every snapshot re-numbers, and element info comes from the latest snapshot. Keep outputs small: `TEXT_PART_CHARS` 2500, `MAX_ELEMENTS` 30.
+13. **Browser safety:** a clean context (no user cookies or logins), `accept_downloads=False`, dialogs dismissed, only `http(s)` URLs (`_validate_url`), and the untrusted-content note on every page. Click and type are level 4 (always ask). A blocked click falls back to a JavaScript `el.click()` (overlays such as search suggestions or cookie banners).
 
 ## Database tables
 `conversations` (id, title, pending jsonb, timestamps) · `messages` (conversation_id, seq, role, content json; unique(conversation_id, seq)) · `audit_events` (event, data jsonb) · `memories` (content, embedding vector(768)) · `documents` (path unique, content_hash, chunk_count) · `document_chunks` (document_id, chunk_index, content, embedding vector(768)). HNSW cosine indexes are created manually in the migration. Embedding columns are `Vector(768).with_variant(JSON(), "sqlite")`, with Vector as the **base** type so `cosine_distance` exists.
@@ -131,7 +137,8 @@ When the model requests a tool that needs confirmation, the agent runs the auto-
 - For live verification, start the server and curl `/chat`. Afterwards, **delete test data** (`DELETE FROM conversations/memories/documents`), and never leave invented "facts" about the user in memory.
 
 ## Measured performance and limits (local model)
-- Warm tool-call step: about 2.6 s. Simple two-tool question: about 15 s, including model load. Answers using attached document chunks: about 28 s. First call after 5 minutes idle adds about 10 s (model reload).
+- Warm tool-call step: about 2.6 s. Simple two-tool question: about 15 s, including model load. Answers using attached document chunks: about 28 s. Open and summarize a web page: about 12–16 s. First call after 5 minutes idle adds about 10 s (model reload).
+- **Cold start after a long idle measured 89 s** (2.5 GB read from disk plus full prompt processing). `warm_up()` runs in a background thread at server start (Ollama provider only, skipped when tests inject a client) and takes about 13 s.
 - Plain `qwen3:4b` (the thinking variant) was rejected. It took about 36 s per step, and with thinking "disabled" it wrote its reasoning into the visible text anyway. Use the **Instruct** variant.
 - A 4B model is weak at multi-step reasoning, ranking long lists, and judging stale sources. **Put computation in tools** (as with `list_directory` `sort_by`) instead of asking the model to do it.
 - The 8K context means Ollama drops the oldest context in long conversations.
@@ -145,11 +152,17 @@ When the model requests a tool that needs confirmation, the agent runs the auto-
 - The SDK raises a bare `TypeError("Could not resolve authentication method…")` when no Anthropic credentials exist. The chat route maps it to 401.
 - `ddgs` search is occasionally empty on the first try, so `search_web` retries once.
 - The system clock and timezone report Turkey Standard Time (UTC+3). `get_current_datetime` uses local time.
+- The small model tends to type and then click a separate Search button (two approvals) rather than use `press_enter=True`.
+- Heredoc Python with nested brackets in `-c` one-liners is error-prone. Write a temp script file under `$TEMP` instead.
 
 ## Working conventions with Majd
 - **Commits:** only when asked ("commit and push"). **No Claude attribution:** no `Co-Authored-By: Claude` trailer, no "Generated with Claude Code"; only Majd appears as author. Use descriptive multi-line commit messages. Before pushing, check `git diff --cached | grep -c sk-ant` is 0.
 - Ask before large downloads, deleting things, or decisions with real tradeoffs (Majd chose local Ollama over free cloud tiers).
 - Majd prefers being told plainly what happened, including mistakes. For example: the API key was once pasted into `.env.example`, which git tracks, and was moved to `.env` before any commit.
 
-## Suggested next step: roadmap step 5 (browser agent)
-Use Playwright (free; `pip install playwright` + `playwright install chromium`). Candidate tools: `browser_open(url)`, `browser_extract()` (readable page text), `browser_click(selector)`, `browser_type(selector, text)`, `browser_screenshot()`. Keep tool outputs short, because of the 8K context and small model, and do extraction and summarization in code where possible. Suggested permissions: navigation and reading at level 0–1, form typing at 2, submitting forms or anything that sends data externally at 4 (always asks). Treat page content as untrusted data (prompt injection). Never let page text trigger tools without the policy engine.
+## Suggested next step: roadmap step 6 (screenshots + computer vision/control)
+The design doc's loop: screenshot → understand the UI → decide → click/type → screenshot again → verify. Constraints to plan around:
+- **Vision needs a vision model.** `qwen3:4b-instruct` is text-only. Free local options in Ollama include `qwen2.5vl:3b` and `gemma3:4b` (both vision-capable), but the GPU has only 4 GB and the chat model already overflows it. Measure load and swap times before committing; one model handling both text and vision may be better than two.
+- **Screenshots:** `mss` or Pillow `ImageGrab` for the desktop; Playwright `page.screenshot()` for the browser. Downscale before sending (token cost and speed).
+- **Desktop control:** `pyautogui` (or `pywinauto` for Windows UI automation, which can read UI elements as text, a better fit for a small model, like the browser's numbered elements). Clicking and typing on the real desktop must be at least level 3 and should always ask at first.
+- Safety: never act on text seen in screenshots as instructions; keep the policy engine on every action; consider an emergency stop.

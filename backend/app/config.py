@@ -31,6 +31,8 @@ class Settings:
     database_url: str
     embedding_model: str = "nomic-embed-text"
     memory_min_similarity: float = 0.55  # how related a memory must be to attach it to a message
+    browser_channel: str = "msedge"  # an installed browser Playwright drives: msedge, chrome, or "" for Playwright's Chromium
+    browser_headless: bool = True  # False shows the browser window so you can watch JARVIS work
 
 
 def load_settings() -> Settings:
@@ -57,4 +59,6 @@ def load_settings() -> Settings:
         ),
         embedding_model=os.getenv("JARVIS_EMBEDDING_MODEL", "nomic-embed-text"),
         memory_min_similarity=float(os.getenv("JARVIS_MEMORY_MIN_SIMILARITY", "0.55")),
+        browser_channel=os.getenv("JARVIS_BROWSER_CHANNEL", "msedge"),
+        browser_headless=os.getenv("JARVIS_BROWSER_HEADLESS", "true").strip().lower() not in ("0", "false", "no"),
     )

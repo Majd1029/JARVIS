@@ -6,6 +6,7 @@ from app.config import Settings
 from app.memory.retrieval import Retriever
 from app.security.permissions import PermissionLevel
 from app.tools.base import Tool
+from app.tools.browser import BrowserSession, build_browser_tools
 from app.tools.calculator import calculator_tool
 from app.tools.clock import clock_tool
 from app.tools.filesystem import Sandbox, build_filesystem_tools
@@ -50,7 +51,8 @@ class ToolRegistry:
         return tools
 
 
-def build_default_registry(settings: Settings, retriever: Retriever | None = None) -> ToolRegistry:
+def build_default_registry(settings: Settings, retriever: Retriever | None = None,
+                           browser: BrowserSession | None = None) -> ToolRegistry:
     if settings.provider == "anthropic":
         registry = ToolRegistry(server_tools=[WEB_SEARCH_TOOL])
     else:
@@ -64,5 +66,8 @@ def build_default_registry(settings: Settings, retriever: Retriever | None = Non
         registry.register(tool)
     if retriever is not None:
         for tool in build_memory_tools(retriever, sandbox):
+            registry.register(tool)
+    if browser is not None:
+        for tool in build_browser_tools(browser):
             registry.register(tool)
     return registry

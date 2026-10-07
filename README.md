@@ -2,15 +2,16 @@
 
 A personal AI assistant built as an agent platform: **LLM = brain · tools = hands · memory = context · permissions = safety**.
 
-Current state: roadmap steps 1–4 plus a basic permission layer:
+Current state: roadmap steps 1–5 plus a basic permission layer:
 - FastAPI backend running a **free local model** through Ollama (Qwen3 4B Instruct by default). Claude can be switched on instead.
 - A tool registry, and a policy engine that asks before risky actions
 - Conversations, pending approvals and the execution trace stored in PostgreSQL
 - Long-term memory (facts) and semantic memory (search over your documents), with pgvector
+- A browser it can drive (Playwright + your installed Edge): read pages, follow links, and, with your approval, type and click
 
 ## Setup
 
-Requirements: Python 3.11+, Docker Desktop and [Ollama](https://ollama.com/download). Everything runs locally, for free.
+Requirements: Python 3.11+, Docker Desktop, [Ollama](https://ollama.com/download) and Microsoft Edge (preinstalled on Windows) or Chrome. Everything runs locally, for free.
 
 1. Start the database. Run this from the repo root:
 
@@ -65,7 +66,7 @@ Requirements: Python 3.11+, Docker Desktop and [Ollama](https://ollama.com/downl
 
 Memory embeddings always come from local Ollama, whichever provider you choose; Anthropic has no embeddings API.
 
-Expect a few seconds to tens of seconds per reply on a 4 GB laptop GPU, plus a one-time load when the model hasn't been used for 5 minutes. A GPU with more VRAM can run a bigger model: pull it, change `FROM` in `ollama/Modelfile` and re-run `ollama create`.
+Expect a few seconds to tens of seconds per reply on a 4 GB laptop GPU. When the server starts it warms the models up in the background (about 15 s), so the first message doesn't pay a cold start; after 5 minutes idle, Ollama unloads the model and the next reply takes about 10 s longer. A GPU with more VRAM can run a bigger model: pull it, change `FROM` in `ollama/Modelfile` and re-run `ollama create`.
 
 ## Run
 
@@ -108,6 +109,28 @@ JARVIS has three kinds of memory:
 - `forget` asks for approval first.
 - Re-indexing an unchanged file does nothing. Indexing a changed file replaces its old chunks.
 
+## Browser
+
+JARVIS drives a real browser through Playwright: your installed Microsoft Edge by default, so there's no browser download. It starts on the first browser tool call and closes when the server stops.
+
+**How the model sees a page:** readable text (from `<main>`/`<article>` when the page has one), 2,500 characters at a time, plus a numbered list of up to 30 visible links, buttons and fields:
+
+```
+[4] input[search] "Search Wikipedia"
+[5] button "Search"
+[6] link "Donate" -> https://donate.wikimedia.org/...
+```
+
+The model acts by number (`browser_click` with element 5), which is much more reliable for a small model than writing CSS selectors.
+
+**Safety:**
+- **Reading is automatic, acting asks.** `browser_open`, `browser_read`, `browser_follow_link` and `browser_back` run automatically. `browser_click` and `browser_type` are level 4 (external action), so they **always ask**, whatever `JARVIS_AUTO_APPROVE_LEVEL` says. A click can submit a form or buy something, and anything typed into a site can be sent to it.
+- **A clean profile.** The browser has none of your cookies, logins or history, so JARVIS is never signed in as you. Downloads are blocked, and pop-up dialogs are dismissed.
+- **Web addresses only.** Only `http(s)` URLs can be opened (no `file:`, `javascript:` or `data:`).
+- **Page text is untrusted.** Every page is labelled as untrusted data, and the system prompt tells the model never to follow instructions found in web content.
+
+To watch JARVIS browse, set `JARVIS_BROWSER_HEADLESS=false` in `backend/.env`.
+
 ## API
 
 | Endpoint | Purpose |
@@ -121,7 +144,7 @@ JARVIS has three kinds of memory:
 | `GET /memory/documents`, `POST /memory/documents` `{path}`, `DELETE /memory/documents/{id}` | List, index and remove documents. |
 | `GET /memory/search?q=...` | Search facts and documents. |
 | `GET /tools` | Registered tools and their permission levels. |
-| `GET /health` | Liveness check: provider, model and embedding-model status, database connectivity. |
+| `GET /health` | Liveness check: provider, model and embedding-model status, database connectivity, browser state. |
 
 A `/chat` response has a `status`:
 - `done`: `reply` holds the answer.
@@ -139,6 +162,8 @@ A `/chat` response has a `status`:
 | `remember`, `search_memory`, `index_file` | 1 local read | yes |
 | `write_file` | 2 local write | **asks** |
 | `forget` | 2 local write | **asks** |
+| `browser_open`, `browser_read`, `browser_follow_link`, `browser_back` | 0 public read | yes |
+| `browser_click`, `browser_type` | 4 external action | **always asks** |
 
 File tools only work inside `JARVIS_ALLOWED_ROOTS`, which defaults to your home folder. Paths outside it, including `..` tricks and symlinks, are refused. `JARVIS_AUTO_APPROVE_LEVEL` (default `1`) sets the highest level that runs without asking. Levels 4 (external communications) and 5 (financial/security) always ask, whatever the setting.
 
@@ -194,11 +219,11 @@ backend/
       retrieval.py       finds relevant memory for a message
       embeddings.py      Ollama embedding client
     db/                  SQLAlchemy models and engine
-    tools/               Tool contract, registry, built-in tools
+    tools/               Tool contract, registry, built-in tools (browser.py = Playwright)
     security/            permission levels, policy engine, audit log
   migrations/            Alembic migrations
   cli.py                 terminal client
-  tests/                 pytest suite (fake model and embeddings, no Ollama needed)
+  tests/                 pytest suite (fake model and embeddings; browser tests use real headless Edge)
 ```
 
 ## Tests
@@ -224,7 +249,6 @@ pytest
 
 ## Next steps (from the roadmap)
 
-5. Browser control (Playwright)
 6. Screenshots + computer control
 7. Voice (speech-to-text / text-to-speech)
 8. Scheduler and events

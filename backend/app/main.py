@@ -3,7 +3,9 @@
 import json
 import logging
 import os
+import threading
 import urllib.request
+from contextlib import asynccontextmanager
 
 import anthropic
 from fastapi import FastAPI
@@ -22,6 +24,7 @@ from app.memory.semantic import DocumentStore
 from app.memory.short_term import ConversationStore
 from app.security.audit import AuditLog
 from app.security.permissions import PolicyEngine
+from app.tools.browser import BrowserSession
 from app.tools.filesystem import Sandbox
 from app.tools.registry import build_default_registry
 
@@ -33,8 +36,10 @@ def create_app(
     client: anthropic.Anthropic | None = None,
     engine: Engine | None = None,
     embedder: Embedder | None = None,
+    browser: BrowserSession | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
+    warm_up_models = client is None and settings.provider == "ollama"  # skipped when tests inject a client
     client = client or make_client(settings)
     engine = engine or make_engine(settings.database_url)
     sessions = make_session_factory(engine)
@@ -46,15 +51,24 @@ def create_app(
         DocumentStore(sessions, embedder),
         min_score=settings.memory_min_similarity,
     )
+    # Started lazily on the first browser tool call; closed when the server stops.
+    browser = browser or BrowserSession(settings.browser_channel, settings.browser_headless)
 
-    app = FastAPI(title="JARVIS", version="0.3.0")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if warm_up_models:
+            threading.Thread(target=warm_up, args=(app.state.agent,), daemon=True).start()
+        yield
+        browser.close()
+
+    app = FastAPI(title="JARVIS", version="0.4.0", lifespan=lifespan)
     app.state.store = ConversationStore(sessions)
     app.state.retriever = retriever
     app.state.sandbox = Sandbox(settings.allowed_roots)
     app.state.agent = Agent(
         client=client,
         store=app.state.store,
-        registry=build_default_registry(settings, retriever),
+        registry=build_default_registry(settings, retriever, browser),
         policy=PolicyEngine(settings.auto_approve_up_to),
         audit=AuditLog(sessions),
         settings=settings,
@@ -76,9 +90,25 @@ def create_app(
         return {"status": "ok", "provider": settings.provider, "model": settings.model,
                 "model_status": chat_model,
                 "embedding_model_status": ollama_model_status(settings.ollama_url, settings.embedding_model),
-                "database": database}
+                "database": database,
+                "browser": "running" if browser.running else "starts on first use"}
 
     return app
+
+
+def warm_up(agent: Agent) -> None:
+    """Load the local models and cache the system prompt + tools in Ollama, so the first real
+    message doesn't pay a cold start (which can take over a minute after a long idle)."""
+    try:
+        agent.client.messages.create(
+            model=agent.settings.model, max_tokens=1, system=agent.system_prompt,
+            tools=agent.registry.definitions(), messages=[{"role": "user", "content": "hi"}],
+        )
+        if agent.retriever is not None:
+            agent.retriever.embedder.embed_query("warm up")
+        logger.info("Local models warmed up.")
+    except Exception as e:  # warm-up is best effort; chat reports real errors itself
+        logger.warning("Model warm-up failed: %s", e)
 
 
 def make_client(settings: Settings) -> anthropic.Anthropic:
