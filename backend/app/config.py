@@ -33,6 +33,8 @@ class Settings:
     memory_min_similarity: float = 0.55  # how related a memory must be to attach it to a message
     browser_channel: str = "msedge"  # an installed browser Playwright drives: msedge, chrome, or "" for Playwright's Chromium
     browser_headless: bool = True  # False shows the browser window so you can watch JARVIS work
+    vision_model: str = "jarvis-vl"  # local Ollama model that reads screenshots (ollama/Modelfile.vision)
+    desktop_control: bool = True  # Windows UI Automation tools (list/read windows; act with approval)
 
 
 def load_settings() -> Settings:
@@ -60,5 +62,12 @@ def load_settings() -> Settings:
         embedding_model=os.getenv("JARVIS_EMBEDDING_MODEL", "nomic-embed-text"),
         memory_min_similarity=float(os.getenv("JARVIS_MEMORY_MIN_SIMILARITY", "0.55")),
         browser_channel=os.getenv("JARVIS_BROWSER_CHANNEL", "msedge"),
-        browser_headless=os.getenv("JARVIS_BROWSER_HEADLESS", "true").strip().lower() not in ("0", "false", "no"),
+        browser_headless=_flag("JARVIS_BROWSER_HEADLESS", True),
+        vision_model=os.getenv("JARVIS_VISION_MODEL", "jarvis-vl"),
+        desktop_control=_flag("JARVIS_DESKTOP_CONTROL", True),
     )
+
+
+def _flag(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    return default if value is None else value.strip().lower() not in ("0", "false", "no", "off")

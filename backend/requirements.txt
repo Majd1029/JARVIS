@@ -10,3 +10,6 @@ pgvector>=0.3  # vector columns + similarity search for memory
 pypdf>=5  # text extraction when indexing PDFs
 playwright>=1.48  # browser control; drives the installed Edge/Chrome (no browser download needed)
 tzdata  # IANA timezone database (Windows has none built in)
+uiautomation>=2.0  # desktop control through Windows UI Automation (Windows only)
+mss>=9  # screenshots
+pillow>=10  # downscale/encode screenshots

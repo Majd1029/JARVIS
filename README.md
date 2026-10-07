@@ -164,6 +164,8 @@ A `/chat` response has a `status`:
 | `forget` | 2 local write | **asks** |
 | `browser_open`, `browser_read`, `browser_follow_link`, `browser_back` | 0 public read | yes |
 | `browser_click`, `browser_type` | 4 external action | **always asks** |
+| `desktop_list_windows`, `desktop_read_window`, `screen_describe` | 1 local read | yes |
+| `desktop_focus_window`, `desktop_click`, `desktop_type`, `desktop_press_keys`, `desktop_open_app` | 3 execute | **asks** |
 
 File tools only work inside `JARVIS_ALLOWED_ROOTS`, which defaults to your home folder. Paths outside it, including `..` tricks and symlinks, are refused. `JARVIS_AUTO_APPROVE_LEVEL` (default `1`) sets the highest level that runs without asking. Levels 4 (external communications) and 5 (financial/security) always ask, whatever the setting.
 

@@ -25,8 +25,10 @@ from app.memory.short_term import ConversationStore
 from app.security.audit import AuditLog
 from app.security.permissions import PolicyEngine
 from app.tools.browser import BrowserSession
+from app.tools.desktop import DesktopSession
 from app.tools.filesystem import Sandbox
 from app.tools.registry import build_default_registry
+from app.tools.screen import ScreenReader
 
 logger = logging.getLogger("jarvis")
 
@@ -37,6 +39,8 @@ def create_app(
     engine: Engine | None = None,
     embedder: Embedder | None = None,
     browser: BrowserSession | None = None,
+    desktop: DesktopSession | None = None,
+    screen: ScreenReader | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     warm_up_models = client is None and settings.provider == "ollama"  # skipped when tests inject a client
@@ -53,6 +57,9 @@ def create_app(
     )
     # Started lazily on the first browser tool call; closed when the server stops.
     browser = browser or BrowserSession(settings.browser_channel, settings.browser_headless)
+    if desktop is None and settings.desktop_control and DesktopSession.available():
+        desktop = DesktopSession()
+    screen = screen or ScreenReader(settings.ollama_url, settings.vision_model)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -60,6 +67,8 @@ def create_app(
             threading.Thread(target=warm_up, args=(app.state.agent,), daemon=True).start()
         yield
         browser.close()
+        if desktop is not None:
+            desktop.close()
 
     app = FastAPI(title="JARVIS", version="0.4.0", lifespan=lifespan)
     app.state.store = ConversationStore(sessions)
@@ -68,7 +77,7 @@ def create_app(
     app.state.agent = Agent(
         client=client,
         store=app.state.store,
-        registry=build_default_registry(settings, retriever, browser),
+        registry=build_default_registry(settings, retriever, browser, desktop, screen),
         policy=PolicyEngine(settings.auto_approve_up_to),
         audit=AuditLog(sessions),
         settings=settings,
@@ -90,8 +99,10 @@ def create_app(
         return {"status": "ok", "provider": settings.provider, "model": settings.model,
                 "model_status": chat_model,
                 "embedding_model_status": ollama_model_status(settings.ollama_url, settings.embedding_model),
+                "vision_model_status": ollama_model_status(settings.ollama_url, settings.vision_model),
                 "database": database,
-                "browser": "running" if browser.running else "starts on first use"}
+                "browser": "running" if browser.running else "starts on first use",
+                "desktop_control": "on" if desktop is not None else "off"}
 
     return app
 

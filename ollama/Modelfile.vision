@@ -1,0 +1,12 @@
+# JARVIS's local vision model: Qwen3-VL 4B Instruct, used by the screen_describe tool.
+# Build it once:
+#   ollama pull qwen3-vl:4b-instruct
+#   ollama create jarvis-vl -f ollama/Modelfile.vision
+#
+# Limiting the context to 8192 tokens matters on a 4 GB GPU: with Ollama's default (much
+# larger) context, more of the model spills to the CPU and one screenshot took 35 s instead of 16 s.
+#
+# It also handles chat and tools (about half as fast as jarvis-qwen3 on a 4 GB GPU). Set
+# JARVIS_MODEL=jarvis-vl to use it for everything and avoid swapping models when reading the screen.
+FROM qwen3-vl:4b-instruct
+PARAMETER num_ctx 8192

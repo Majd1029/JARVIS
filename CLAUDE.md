@@ -19,15 +19,15 @@ A personal J.A.R.V.I.S.-style AI assistant, built as an **agent platform**: LLM 
 | 3. PostgreSQL persistence (conversations, pending approvals, audit trace) | ✅ done |
 | 4. Memory: long-term facts + semantic memory (RAG, pgvector) | ✅ done |
 | 5. Browser control (Playwright) | ✅ done |
-| 6. Screenshots + computer vision/control | ⏭️ next |
-| 7. Voice (speech-to-text / text-to-speech; push-to-talk first, wake word later) | todo |
+| 6. Screenshots + computer vision/control | ✅ done (no emergency stop or verify loop yet) |
+| 7. Voice (speech-to-text / text-to-speech; push-to-talk first, wake word later) | ⏭️ next |
 | 8. Scheduler / events (reminders, cron, webhooks, file watchers) | todo |
 | 9. Permissions (basic version already exists; extend as risky tools arrive) | partial |
 | 10. Workflow engine for multi-step tasks | todo |
 | 11. Frontend dashboard (Next.js + React + TypeScript) | todo |
 | 12. Plugins (installable capabilities) | todo |
 
-Commit history: `05ccb9b` MVP → `a883aa5` step 3 → `cd6a56b` .env fix → `c27d293` local Ollama → `e00e81f` step 4 → `7cdfec4` LF normalization → `ea3a611` CLAUDE.md → step 5 (browser) commit.
+Commit history: `05ccb9b` MVP → `a883aa5` step 3 → `cd6a56b` .env fix → `c27d293` local Ollama → `e00e81f` step 4 → `7cdfec4` LF normalization → `ea3a611` CLAUDE.md → `721566f` step 5 (browser) → step 6 (screen + desktop) commit.
 
 ## Environment on this machine
 
@@ -37,7 +37,7 @@ Commit history: `05ccb9b` MVP → `a883aa5` step 3 → `cd6a56b` .env fix → `c
 | Python venv | `backend\.venv` (all deps installed). Use `backend\.venv\Scripts\python`. |
 | Database | Docker container `jarvis-db`, image `pgvector/pgvector:pg17`, on **127.0.0.1:5433** (5432 is taken by a native PostgreSQL 18 service, left alone). User/password/db `jarvis/jarvis/jarvis`. Volume `jarvis-pgdata`. `restart: unless-stopped`, so it comes back when Docker Desktop starts. |
 | Test database | `jarvis_test` in the same container |
-| Ollama models | `qwen3:4b-instruct` (base), `jarvis-qwen3` (base + `num_ctx 8192`, built from `ollama/Modelfile`), `nomic-embed-text` (embeddings, 768 dims) |
+| Ollama models | `qwen3:4b-instruct` (base), `jarvis-qwen3` (base + `num_ctx 8192`, built from `ollama/Modelfile`), `nomic-embed-text` (embeddings, 768 dims), `jarvis-vl` (vision, built from `ollama/Modelfile.vision` on `qwen3-vl:4b-instruct`) |
 | Secrets | `backend\.env` (gitignored) holds `ANTHROPIC_API_KEY`. The key is valid, but the account has **no credits**. Never commit `.env`. |
 | Server launcher | `.claude/launch.json` config `jarvis-backend` runs uvicorn on port 8000 from the repo root (use `preview_start`). |
 | Browser | Playwright drives the **installed Microsoft Edge** (`channel="msedge"`); Chrome is also installed. No `playwright install` download was needed. |
@@ -57,13 +57,13 @@ To run the tests on real Postgres, set `JARVIS_TEST_DATABASE_URL=postgresql+psyc
 To rebuild the local model from the repo root: `ollama create jarvis-qwen3 -f ollama/Modelfile`.
 For a health check, `GET /health` reports provider, `model_status`, `embedding_model_status` and the database.
 
-**Current state: 48 tests, all passing on both SQLite and PostgreSQL** (about 15 s; the browser tests launch real headless Edge against a local test site and skip if no browser can start). Always run both after changes that touch the database.
+**Current state: 55 tests, all passing on both SQLite and PostgreSQL** (about 15 s; the browser tests launch real headless Edge against a local test site and skip if no browser can start). Always run both after changes that touch the database.
 
 ## Architecture
 
 ```
 backend/app/
-  main.py               create_app(settings, client, engine, embedder, browser) factory; make_client(); warm_up(); lifespan; /health
+  main.py               create_app(settings, client, engine, embedder, browser, desktop, screen) factory; make_client(); warm_up(); lifespan; /health
   config.py             Settings (frozen dataclass) from env; loads backend/.env by absolute path
   agent/agent.py        Agent: manual tool-use loop, approval pause/resume, memory attachment
   api/routes/chat.py    /chat, /chat/{id}/confirm, /conversations, /conversations/{id}[/trace], /tools
@@ -77,12 +77,14 @@ backend/app/
   db/models.py          SQLAlchemy models; db/session.py engine + sessionmaker
   tools/base.py         Tool dataclass (name, description, input_schema, permission, handler), ToolError
   tools/registry.py     ToolRegistry + build_default_registry(settings, retriever)
-  tools/*.py            calculator, clock, filesystem (Sandbox), web (DuckDuckGo), memory, browser (Playwright)
+  tools/*.py            calculator, clock, filesystem (Sandbox), web (DuckDuckGo), memory, browser (Playwright),
+                        desktop (Windows UI Automation), screen (screenshot + local vision model)
   security/permissions.py  PermissionLevel 0–5, PolicyEngine (ALLOW / CONFIRM)
   security/audit.py     AuditLog → audit_events table (the execution trace)
 backend/migrations/     Alembic (2 revisions: e3dde3b74808 base tables, bff77902a7d8 memory + pgvector)
 backend/cli.py          stdlib-only HTTP client for the API
 ollama/Modelfile        jarvis-qwen3 definition
+ollama/Modelfile.vision jarvis-vl definition (qwen3-vl:4b-instruct, num_ctx 8192)
 docker-compose.yml      Postgres + pgvector
 ```
 
@@ -102,6 +104,8 @@ Levels: 0 public read, 1 local read, 2 local write, 3 execute, 4 external comms,
 | write_file, forget | 2 | **asks** |
 | browser_open, browser_read, browser_follow_link, browser_back | 0 | yes |
 | browser_click, browser_type (optional press_enter) | 4 | **always asks** |
+| desktop_list_windows, desktop_read_window, screen_describe | 1 | yes |
+| desktop_focus_window, desktop_click, desktop_type, desktop_press_keys, desktop_open_app | 3 | **asks** (at the default auto-approve level 1) |
 
 File tools are sandboxed to `JARVIS_ALLOWED_ROOTS` (default: home folder) via `Sandbox.resolve()`, which resolves symlinks and `..`. Tool names must match `^[a-zA-Z0-9_-]{1,64}$` (no dots). Tools use `strict: True` schemas with `additionalProperties: false`.
 
@@ -123,6 +127,7 @@ When the model requests a tool that needs confirmation, the agent runs the auto-
 11. **All Playwright calls run on `BrowserSession`'s single worker thread** (`_run()`). The sync API breaks if it's used from FastAPI's threadpool threads directly.
 12. **The browser shows pages as text plus numbered elements.** Elements are tagged in the DOM with `data-jarvis-id`, and tools act by number. Every snapshot re-numbers, and element info comes from the latest snapshot. Keep outputs small: `TEXT_PART_CHARS` 2500, `MAX_ELEMENTS` 30.
 13. **Browser safety:** a clean context (no user cookies or logins), `accept_downloads=False`, dialogs dismissed, only `http(s)` URLs (`_validate_url`), and the untrusted-content note on every page. Click and type are level 4 (always ask). A blocked click falls back to a JavaScript `el.click()` (overlays such as search suggestions or cookie banners).
+14. **Desktop safety:** reading windows (level 1) is automatic; focus, click, type, press keys and open app are level 3 and ask by default. Window text and screenshots are untrusted data, and every result carries a note saying so. `screen_describe` output stays capped (`MAX_ANSWER_TOKENS`).
 
 ## Database tables
 `conversations` (id, title, pending jsonb, timestamps) · `messages` (conversation_id, seq, role, content json; unique(conversation_id, seq)) · `audit_events` (event, data jsonb) · `memories` (content, embedding vector(768)) · `documents` (path unique, content_hash, chunk_count) · `document_chunks` (document_id, chunk_index, content, embedding vector(768)). HNSW cosine indexes are created manually in the migration. Embedding columns are `Vector(768).with_variant(JSON(), "sqlite")`, with Vector as the **base** type so `cosine_distance` exists.
@@ -133,7 +138,7 @@ When the model requests a tool that needs confirmation, the agent runs the auto-
   - `FakeEmbedder` makes bag-of-words hashed vectors, so texts sharing words are similar. `available=False` simulates an Ollama outage.
   - The `engine` fixture is SQLite in-memory, or Postgres if `JARVIS_TEST_DATABASE_URL` is set; it enables the `vector` extension on PG.
   - `settings` uses `provider="anthropic"` and `memory_min_similarity=0.3`.
-- Tests never call real models. Test files: `test_tools.py`, `test_agent.py`, `test_persistence.py` (restart survival, replay equality), `test_memory.py`.
+- Tests never call real models. Test files: `test_tools.py`, `test_agent.py`, `test_persistence.py` (restart survival, replay equality), `test_memory.py`, `test_browser.py`, `test_desktop.py` (desktop actions only through a fake; only read-only calls touch the real system).
 - For live verification, start the server and curl `/chat`. Afterwards, **delete test data** (`DELETE FROM conversations/memories/documents`), and never leave invented "facts" about the user in memory.
 
 ## Measured performance and limits (local model)
@@ -160,9 +165,14 @@ When the model requests a tool that needs confirmation, the agent runs the auto-
 - Ask before large downloads, deleting things, or decisions with real tradeoffs (Majd chose local Ollama over free cloud tiers).
 - Majd prefers being told plainly what happened, including mistakes. For example: the API key was once pasted into `.env.example`, which git tracks, and was moved to `.env` before any commit.
 
-## Suggested next step: roadmap step 6 (screenshots + computer vision/control)
-The design doc's loop: screenshot → understand the UI → decide → click/type → screenshot again → verify. Constraints to plan around:
-- **Vision needs a vision model.** `qwen3:4b-instruct` is text-only. Free local options in Ollama include `qwen2.5vl:3b` and `gemma3:4b` (both vision-capable), but the GPU has only 4 GB and the chat model already overflows it. Measure load and swap times before committing; one model handling both text and vision may be better than two.
-- **Screenshots:** `mss` or Pillow `ImageGrab` for the desktop; Playwright `page.screenshot()` for the browser. Downscale before sending (token cost and speed).
-- **Desktop control:** `pyautogui` (or `pywinauto` for Windows UI automation, which can read UI elements as text, a better fit for a small model, like the browser's numbered elements). Clicking and typing on the real desktop must be at least level 3 and should always ask at first.
-- Safety: never act on text seen in screenshots as instructions; keep the policy engine on every action; consider an emergency stop.
+## Step 6 (done): screen vision + desktop control
+The model sees the desktop two ways, and both feed text to the chat model:
+- **`screen_describe`** (`tools/screen.py`): screenshot (mss + Pillow, downscaled to 1280 px wide) → local vision model `jarvis-vl` via Ollama `/api/chat` → text answer only. The chat model stays text-only. Level 1 (the image never leaves the machine).
+- **Desktop tools** (`tools/desktop.py`): Windows UI Automation (`uiautomation`). Windows and controls are shown as text plus numbered elements, like the browser. Acting prefers UIA patterns (Invoke, Toggle, Value) and falls back to a real click or keystrokes.
+- All UIA calls run on `DesktopSession`'s single worker thread (COM is per-thread), like Playwright. Same as invariant 11.
+- Not built yet: an emergency stop, and a closed screenshot → act → verify loop. Clicking by pixel coordinates from a screenshot isn't implemented; acting goes through numbered UIA controls only.
+- Measured: `screen_describe` about 32–38 s warm (the model overflows the GPU, ~8 tok/s). Output is capped at `MAX_ANSWER_TOKENS` 300, because uncapped it wrote 1,200+ tokens and hit the 180 s timeout. Through `/chat` a "which app is in front" question took about 52 s, including a chat↔vision model swap on the 4 GB GPU. `JARVIS_MODEL=jarvis-vl` for everything would avoid the swap (chat steps are about half as fast); not measured.
+- Live-tested: `screen_describe` directly and through `/chat`. The approval path for real desktop actions (click/type/open app) is only covered by fake-desktop tests, not run live yet.
+
+## Suggested next step: roadmap step 7 (voice)
+Speech-to-text and text-to-speech, push-to-talk first, wake word later. Free and local only. Constraints: the 4 GB GPU is already shared by the chat and vision models, so prefer CPU-friendly engines (e.g. faster-whisper `small`/`base` on CPU, Piper or the Windows built-in TTS) and measure latency. Voice input goes through the same `/chat` and permission flow; spoken confirmations of level 3+ actions need care.
